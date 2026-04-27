@@ -159,6 +159,7 @@ class QwenImagePipelineConfig(QwenImageRolloutPipelineMixin, ImagePipelineConfig
     dit_config: DiTConfig = field(default_factory=QwenImageDitConfig)
     # VAE
     vae_config: VAEConfig = field(default_factory=QwenImageVAEConfig)
+    vae_precision: str = "bf16"
 
     enable_autocast: bool = False
 
@@ -208,7 +209,11 @@ class QwenImagePipelineConfig(QwenImageRolloutPipelineMixin, ImagePipelineConfig
             if batch.true_cfg_scale is not None
             else batch.guidance_scale
         )
-        if cfg_scale <= 1.0 or not batch.do_classifier_free_guidance:
+        if (
+            cfg_scale is None
+            or cfg_scale <= 1.0
+            or not batch.do_classifier_free_guidance
+        ):
             return noise_pred
 
         cond_norm = torch.norm(noise_pred_cond, dim=-1, keepdim=True)
@@ -258,6 +263,20 @@ class QwenImagePipelineConfig(QwenImageRolloutPipelineMixin, ImagePipelineConfig
             .to(device, dtype)
         )
         return scaling_factor, shift_factor
+
+    def normalize_vae_encode(self, image_latents, vae):
+        vae_arch_config = self.vae_config.arch_config
+        latents_mean = (
+            torch.tensor(vae_arch_config.latents_mean)
+            .view(1, vae_arch_config.z_dim, 1, 1, 1)
+            .to(image_latents.device, image_latents.dtype)
+        )
+        latents_std = (
+            torch.tensor(vae_arch_config.latents_std)
+            .view(1, vae_arch_config.z_dim, 1, 1, 1)
+            .to(image_latents.device, image_latents.dtype)
+        )
+        return (image_latents - latents_mean) / latents_std
 
     @staticmethod
     def get_freqs_cis(img_shapes, txt_seq_lens, rotary_emb, device, dtype):

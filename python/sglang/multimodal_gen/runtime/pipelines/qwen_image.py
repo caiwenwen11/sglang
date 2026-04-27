@@ -4,6 +4,9 @@
 from diffusers.image_processor import VaeImageProcessor
 
 from sglang.multimodal_gen.runtime.pipelines_core import LoRAPipeline
+from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
+    QwenImageEditPlusPipelineConfig,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
     ComposedPipelineBase,
 )
@@ -94,6 +97,18 @@ class QwenImageEditPipeline(LoRAPipeline, ComposedPipelineBase):
 
 class QwenImageEditPlusPipeline(QwenImageEditPipeline):
     pipeline_name = "QwenImageEditPlusPipeline"
+
+    def create_pipeline_stages(self, server_args: ServerArgs):
+        if (
+            type(server_args.pipeline_config) is QwenImageEditPlusPipelineConfig
+            and server_args.sp_degree == 1
+        ):
+            transformer = self.get_module("transformer")
+            transformer.use_official_txt_norm = True
+            for block in transformer.transformer_blocks:
+                block.attn.use_official_attention = True
+                block.use_official_modulate = True
+        super().create_pipeline_stages(server_args)
 
 
 def prepare_mu_layered(batch: Req, server_args: ServerArgs):

@@ -431,22 +431,23 @@ class Qwen2_5_VLTextModel(nn.Module):
 
         # It may already have been prepared by e.g. `generate`
         if not isinstance(causal_mask_mapping := attention_mask, dict):
-            mask_args = (
-                self.config,
-                inputs_embeds,
-                attention_mask,
-                cache_position,
-                past_key_values,
-                text_position_ids,
-            )
+            # Prepare mask arguments
+            mask_kwargs = {
+                "config": self.config,
+                "input_embeds": inputs_embeds,
+                "attention_mask": attention_mask,
+                "cache_position": cache_position,
+                "past_key_values": past_key_values,
+                "position_ids": text_position_ids,
+            }
             # Create the masks
             causal_mask_mapping = {
-                "full_attention": create_causal_mask(*mask_args),
+                "full_attention": create_causal_mask(**mask_kwargs),
             }
             # The sliding window alternating layers are not always activated depending on the config
             if self.has_sliding_layers:
                 causal_mask_mapping["sliding_attention"] = (
-                    create_sliding_window_causal_mask(*mask_args)
+                    create_sliding_window_causal_mask(**mask_kwargs)
                 )
 
         hidden_states = inputs_embeds
@@ -786,7 +787,12 @@ class Qwen2_5_VLModel(nn.Module):
                 The temporal, height and width of feature shape of each video in LLM.
         """
         pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
-        video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
+        cudnn_sdp_enabled = torch.backends.cuda.cudnn_sdp_enabled()
+        torch.backends.cuda.enable_cudnn_sdp(True)
+        try:
+            video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
+        finally:
+            torch.backends.cuda.enable_cudnn_sdp(cudnn_sdp_enabled)
         split_sizes = (
             video_grid_thw.prod(-1) // self.visual.spatial_merge_size**2
         ).tolist()
@@ -808,7 +814,12 @@ class Qwen2_5_VLModel(nn.Module):
                 The temporal, height and width of feature shape of each image in LLM.
         """
         pixel_values = pixel_values.type(self.visual.dtype)
-        image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
+        cudnn_sdp_enabled = torch.backends.cuda.cudnn_sdp_enabled()
+        torch.backends.cuda.enable_cudnn_sdp(True)
+        try:
+            image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
+        finally:
+            torch.backends.cuda.enable_cudnn_sdp(cudnn_sdp_enabled)
         if not isinstance(image_embeds, torch.Tensor):
             # In transformers v5, the visual encoder returns BaseModelOutputWithPooling.
             # pooler_output contains the spatially merged embeddings (what we need),
@@ -989,19 +1000,24 @@ class Qwen2_5_VLModel(nn.Module):
                 delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=1)
                 position_ids += delta.to(position_ids.device)
 
-        outputs = self.language_model(
-            input_ids=None,
-            position_ids=position_ids,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
-            cache_position=cache_position,
-            **kwargs,
-        )
+        cudnn_sdp_enabled = torch.backends.cuda.cudnn_sdp_enabled()
+        torch.backends.cuda.enable_cudnn_sdp(True)
+        try:
+            outputs = self.language_model(
+                input_ids=None,
+                position_ids=position_ids,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=True,
+                cache_position=cache_position,
+                **kwargs,
+            )
+        finally:
+            torch.backends.cuda.enable_cudnn_sdp(cudnn_sdp_enabled)
 
         output = Qwen2_5_VLModelOutputWithPast(
             last_hidden_state=outputs.last_hidden_state,
