@@ -376,7 +376,7 @@ install_extra_deps() {
         EXTRA_NVIDIA_SPECS="nvidia-cuda-nvrtc-cu12"
     fi
     $PIP_CMD install ${MOONCAKE_PKG} ${EXTRA_NVIDIA_SPECS} py-spy scipy huggingface_hub[hf_xet] pytest $PIP_INSTALL_SUFFIX
-    
+
     # Best-effort NIXL install for decode-radix disaggregation coverage.
     $PIP_CMD install nixl $PIP_INSTALL_SUFFIX || echo "Warning: nixl install failed; continuing without nixl"
 
