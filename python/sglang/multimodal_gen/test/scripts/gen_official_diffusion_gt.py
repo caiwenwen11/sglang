@@ -61,7 +61,6 @@ from sglang.multimodal_gen.test.test_utils import (
     output_format_to_ext,
 )
 
-
 SUITE_CASES = {
     "1-gpu": ONE_GPU_CASES,
     "2-gpu": TWO_GPU_CASES,
