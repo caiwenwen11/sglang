@@ -744,6 +744,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         self.init_routed_experts_capturer()
 
+        self.attn_backend = None
+        self.decode_attn_backend = None
+        self.decode_attn_backend_group = []
         self.graph_runner = None
         self.graph_mem_usage = 0
         self.piecewise_cuda_graph_runner = None
@@ -2221,9 +2224,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             return
 
         from sglang.srt.layers.communicator import FUSE_ALLREDUCE_MAX_BATCH_SIZE
-        from sglang.srt.layers.flashinfer_comm_fusion import (
-            pre_initialize_workspaces,
-        )
+        from sglang.srt.layers.flashinfer_comm_fusion import pre_initialize_workspaces
 
         pre_initialize_workspaces(
             max_token_num=FUSE_ALLREDUCE_MAX_BATCH_SIZE,
