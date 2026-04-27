@@ -462,17 +462,17 @@ class Scheduler(SchedulerDisaggMixin):
             reqs = [item[1] for item in items]
 
             try:
-                processed_req = reqs[0]
+                first_req = reqs[0]
                 is_warmup = (
-                    processed_req.is_warmup if isinstance(processed_req, Req) else False
+                    first_req.is_warmup if isinstance(first_req, Req) else False
                 )
 
-                handler = self.request_handlers.get(type(processed_req))
+                handler = self.request_handlers.get(type(first_req))
                 if handler:
                     output_batch = handler(reqs)
                 else:
                     output_batch = OutputBatch(
-                        error=f"Unknown request type: {type(processed_req)}"
+                        error=f"Unknown request type: {type(first_req)}"
                     )
             except Exception as e:
                 logger.error(
@@ -483,9 +483,6 @@ class Scheduler(SchedulerDisaggMixin):
 
             # 3. return results
             try:
-                is_warmup = (
-                    processed_req.is_warmup if isinstance(processed_req, Req) else False
-                )
                 if is_warmup:
                     if output_batch.error is None:
                         if self._warmup_total > 0:
