@@ -176,6 +176,11 @@ def _preflight_check_workspace_memory(
     torch.cuda.mem_get_info() is not a reliable signal: the fabric
     pool can be smaller than the driver's generic free counter, so we
     probe with the same handle type flashinfer uses.
+
+    Lifecycle note: the probe momentarily allocates a buffer the size of
+    flashinfer's largest single allocation (the lamport buffer, capped at
+    3 * MAX_COMM_SIZE ~= 6 GiB) and releases it immediately. Intended to
+    run once at startup before the model occupies device memory.
     """
     # Setup: import + prop construction + granularity query. Any failure
     # here means the preflight can't run on this platform; fall through to
@@ -187,8 +192,15 @@ def _preflight_check_workspace_memory(
         from cuda import cuda as _cu
 
         dtype_bytes = torch.empty((), dtype=dtype).element_size()
-        # lamport buffer (3x the base) is the largest flashinfer allocation.
-        probe_size = 3 * world_size * max_token_num * hidden_dim * dtype_bytes
+        # Mirror flashinfer's lamport sizing in trtllm_ar.py: cap the
+        # per-comm size at MAX_COMM_SIZE (INT32_MAX rounded down to 2 MiB)
+        # then triple it for the lamport buffer.
+        _MAX_COMM_SIZE = 2147483647 & ~((1 << 21) - 1)
+        lamport_comm_size = min(
+            world_size * max_token_num * hidden_dim * dtype_bytes,
+            _MAX_COMM_SIZE,
+        )
+        probe_size = 3 * lamport_comm_size
 
         prop = _cu.CUmemAllocationProp()
         prop.requestedHandleTypes = (
@@ -230,7 +242,7 @@ def _preflight_check_workspace_memory(
         err, handle = _cu.cuMemCreate(aligned_probe, prop, 0)
         local_ok = 1 if err == _cu.CUresult.CUDA_SUCCESS else 0
     finally:
-        if local_ok and handle is not None:
+        if local_ok:
             _cu.cuMemRelease(handle)
 
     # Vote: failures here (e.g. gloo transport error) cannot fall through
