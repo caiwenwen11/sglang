@@ -520,14 +520,12 @@ class LTX2DenoisingStage(DenoisingStage):
 
         mid_video_sigma_for_x0 = (
             mid_video_timestep
-            if ctx.use_ltx23_hq_timestep_semantics
-            and mid_video_timestep is not None
+            if ctx.use_ltx23_hq_timestep_semantics and mid_video_timestep is not None
             else sub_sigma
         )
         mid_audio_sigma_for_x0 = (
             mid_audio_timestep
-            if ctx.use_ltx23_hq_timestep_semantics
-            and mid_audio_timestep is not None
+            if ctx.use_ltx23_hq_timestep_semantics and mid_audio_timestep is not None
             else sub_sigma
         )
         midpoint_denoised_video = self._ltx2_velocity_to_x0(
@@ -540,12 +538,8 @@ class LTX2DenoisingStage(DenoisingStage):
         eps2_video = midpoint_denoised_video.double() - anchor_video
         eps2_audio = midpoint_denoised_audio.double() - anchor_audio
 
-        next_video_det = anchor_video + h_coeff * (
-            b1 * eps1_video + b2 * eps2_video
-        )
-        next_audio_det = anchor_audio + h_coeff * (
-            b1 * eps1_audio + b2 * eps2_audio
-        )
+        next_video_det = anchor_video + h_coeff * (b1 * eps1_video + b2 * eps2_video)
+        next_audio_det = anchor_audio + h_coeff * (b1 * eps1_audio + b2 * eps2_audio)
 
         step_noise_video = (
             self._ltx2_res2s_noise_like(ctx.latents, ctx, substep=False)
@@ -1898,9 +1892,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 h = -torch.log(torch.clamp(sigma_next_d / sigma_d, min=1e-12))
                 h_value = float(h.item())
                 if ctx.use_native_hq_res2s_sde_noise:
-                    a21, b1, b2 = self._ltx2_get_res2s_coefficients_official(
-                        h_value
-                    )
+                    a21, b1, b2 = self._ltx2_get_res2s_coefficients_official(h_value)
                     h_coeff = h_value
                 else:
                     a21, b1, b2 = self._ltx2_get_res2s_coefficients(h)
@@ -1912,12 +1904,8 @@ class LTX2DenoisingStage(DenoisingStage):
                 eps1_video = denoised_video.double() - anchor_video
                 eps1_audio = denoised_audio.double() - anchor_audio
 
-                midpoint_video_deterministic = (
-                    anchor_video + h_coeff * a21 * eps1_video
-                )
-                midpoint_audio_deterministic = (
-                    anchor_audio + h_coeff * a21 * eps1_audio
-                )
+                midpoint_video_deterministic = anchor_video + h_coeff * a21 * eps1_video
+                midpoint_audio_deterministic = anchor_audio + h_coeff * a21 * eps1_audio
 
                 substep_video_noise = (
                     self._ltx2_res2s_noise_like(ctx.latents, ctx, substep=True)
@@ -1927,9 +1915,7 @@ class LTX2DenoisingStage(DenoisingStage):
                     ).float()
                 )
                 substep_audio_noise = (
-                    self._ltx2_res2s_noise_like(
-                        ctx.audio_latents, ctx, substep=True
-                    )
+                    self._ltx2_res2s_noise_like(ctx.audio_latents, ctx, substep=True)
                     if ctx.use_native_hq_res2s_sde_noise
                     else self._randn_like_with_batch_generators(
                         ctx.audio_latents, batch
@@ -1994,9 +1980,7 @@ class LTX2DenoisingStage(DenoisingStage):
                     ).float()
                 )
                 step_audio_noise = (
-                    self._ltx2_res2s_noise_like(
-                        ctx.audio_latents, ctx, substep=False
-                    )
+                    self._ltx2_res2s_noise_like(ctx.audio_latents, ctx, substep=False)
                     if ctx.use_native_hq_res2s_sde_noise
                     else self._randn_like_with_batch_generators(
                         ctx.audio_latents, batch

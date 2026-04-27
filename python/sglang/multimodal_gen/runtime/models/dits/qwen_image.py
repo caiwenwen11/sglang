@@ -115,9 +115,7 @@ def _qwen_diffusers_rms_norm(
     return hidden_states
 
 
-def _apply_qwen_rope_from_cache(
-    x: torch.Tensor, cache: torch.Tensor
-) -> torch.Tensor:
+def _apply_qwen_rope_from_cache(x: torch.Tensor, cache: torch.Tensor) -> torch.Tensor:
     half = cache.shape[-1] // 2
     cos = cache[:, :half].to(device=x.device, dtype=torch.float32)
     sin = cache[:, half:].to(device=x.device, dtype=torch.float32)

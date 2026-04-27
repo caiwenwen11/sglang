@@ -243,7 +243,12 @@ def _final_request_for_case(case: DiffusionTestCase):
         server_args,
         **user_kwargs,
     )
-    return prepare_request(server_args, sampling_params), sampling_params, server_args, output_size
+    return (
+        prepare_request(server_args, sampling_params),
+        sampling_params,
+        server_args,
+        output_size,
+    )
 
 
 def _torch_dtype(dtype_arg: str) -> torch.dtype:
@@ -278,7 +283,9 @@ def _load_pipe(
         load_kwargs["device_map"] = device_map
 
     try:
-        pipe = DiffusionPipeline.from_pretrained(case.server_args.model_path, **load_kwargs)
+        pipe = DiffusionPipeline.from_pretrained(
+            case.server_args.model_path, **load_kwargs
+        )
     except (TypeError, ValueError) as exc:
         if "device_map" not in load_kwargs:
             raise
@@ -288,7 +295,9 @@ def _load_pipe(
         )
         load_kwargs.pop("device_map", None)
         device_map = "none"
-        pipe = DiffusionPipeline.from_pretrained(case.server_args.model_path, **load_kwargs)
+        pipe = DiffusionPipeline.from_pretrained(
+            case.server_args.model_path, **load_kwargs
+        )
     except AttributeError:
         load_kwargs["custom_pipeline"] = case.server_args.model_path
         load_kwargs["trust_remote_code"] = True
@@ -314,7 +323,9 @@ def _call_signature(pipe: DiffusionPipeline) -> inspect.Signature | None:
         return None
 
 
-def _filter_kwargs(pipe: DiffusionPipeline, kwargs: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+def _filter_kwargs(
+    pipe: DiffusionPipeline, kwargs: dict[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
     sig = _call_signature(pipe)
     if sig is None:
         return kwargs, []
@@ -329,7 +340,9 @@ def _filter_kwargs(pipe: DiffusionPipeline, kwargs: dict[str, Any]) -> tuple[dic
     return kept, ignored
 
 
-def _load_input_images(image_path: Any, *, force_rgba: bool = False) -> list[Image.Image]:
+def _load_input_images(
+    image_path: Any, *, force_rgba: bool = False
+) -> list[Image.Image]:
     if image_path is None:
         return []
     paths = image_path if isinstance(image_path, list) else [image_path]
@@ -410,7 +423,9 @@ def _generator(device_arg: str, seed: int) -> torch.Generator:
     return torch.Generator(device=device).manual_seed(seed)
 
 
-def _apply_lora_if_needed(pipe: DiffusionPipeline, case: DiffusionTestCase) -> dict[str, Any]:
+def _apply_lora_if_needed(
+    pipe: DiffusionPipeline, case: DiffusionTestCase
+) -> dict[str, Any]:
     lora_path = case.server_args.lora_path or case.server_args.dynamic_lora_path
     if not lora_path:
         return {}
@@ -451,7 +466,9 @@ def _build_call_kwargs(
         kwargs["num_images_per_prompt"] = req.num_outputs_per_prompt
 
     force_rgba = type(pipe).__name__ == "QwenImageLayeredPipeline"
-    input_images = _load_input_images(getattr(req, "image_path", None), force_rgba=force_rgba)
+    input_images = _load_input_images(
+        getattr(req, "image_path", None), force_rgba=force_rgba
+    )
     if input_images:
         _apply_sglang_condition_size(kwargs, input_images, server_args, req)
         sig = _call_signature(pipe)
@@ -676,12 +693,16 @@ def _run_case(
                 "pipeline_class": "WanT2V",
                 "output_size": output_size,
                 "device_map": "wan-official",
-                "call_kwargs": _jsonable(_build_wan_official_dry_run_kwargs(req, server_args)),
+                "call_kwargs": _jsonable(
+                    _build_wan_official_dry_run_kwargs(req, server_args)
+                ),
                 "ignored_kwargs": [],
                 "lora": {},
                 "dry_run": True,
             }
-        return _run_wan_official_case(case, req, server_args, output_size, out_dir, args)
+        return _run_wan_official_case(
+            case, req, server_args, output_size, out_dir, args
+        )
 
     is_video = case.server_args.modality == "video"
     device_map = args.device_map
@@ -794,7 +815,9 @@ def _install_wan_official_compat_modules() -> None:
             deterministic=False,
         ):
             if window_size != (-1, -1):
-                raise NotImplementedError("Wan official GT fallback only supports full attention")
+                raise NotImplementedError(
+                    "Wan official GT fallback only supports full attention"
+                )
 
             outputs = []
             batch_size = cu_seqlens_q.numel() - 1
@@ -852,7 +875,9 @@ def _install_wan_official_compat_modules() -> None:
         sys.modules["ftfy"] = module
 
 
-def _build_wan_official_dry_run_kwargs(req: Any, server_args: ServerArgs) -> dict[str, Any]:
+def _build_wan_official_dry_run_kwargs(
+    req: Any, server_args: ServerArgs
+) -> dict[str, Any]:
     return {
         "prompt": req.prompt,
         "size": [req.width, req.height],
@@ -992,7 +1017,9 @@ def main() -> None:
 
     if (args.partition_id is None) != (args.total_partitions is None):
         parser.error("--partition-id and --total-partitions must be provided together")
-    if args.partition_id is not None and not (0 <= args.partition_id < args.total_partitions):
+    if args.partition_id is not None and not (
+        0 <= args.partition_id < args.total_partitions
+    ):
         parser.error("--partition-id must be in [0, total-partitions)")
 
     cases = _select_cases(args)
