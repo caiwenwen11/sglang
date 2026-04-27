@@ -151,10 +151,13 @@ class DFlashWorker:
             dp_rank=dp_rank,
             nccl_port=nccl_port,
             is_draft_worker=True,
+        )
+        self.draft_worker.alloc_memory_pool(
+            memory_pool_config=target_worker.model_runner.memory_pool_config,
             req_to_token_pool=shared_req_to_token_pool,
             token_to_kv_pool_allocator=target_token_to_kv_pool_allocator,
-            memory_pool_config=target_worker.model_runner.memory_pool_config,
         )
+        self.draft_worker.init_backends()
         set_global_server_args_for_scheduler(saved_server_args)
         self.draft_model_runner = self.draft_worker.model_runner
         self.draft_model = self.draft_model_runner.model

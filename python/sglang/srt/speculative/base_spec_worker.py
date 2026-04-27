@@ -16,6 +16,12 @@ class BaseDraftWorker(ABC):
     def draft_extend():
         pass
 
+    def alloc_memory_pool(self, **kwargs):
+        pass
+
+    def init_backends(self):
+        pass
+
 
 class BaseSpecWorker(ABC):
     @property
@@ -31,4 +37,10 @@ class BaseSpecWorker(ABC):
     @abstractmethod
     def clear_cache_pool(self):
         # TODO: move this abstract method to BaseTpWorker and call through self.model_runner
+        pass
+
+    def alloc_memory_pool(self, **kwargs):
+        pass
+
+    def init_backends(self):
         pass

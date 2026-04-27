@@ -25,6 +25,12 @@ USE_FULL_MASK = True
 
 
 class NGRAMWorker:
+    def alloc_memory_pool(self, **kwargs):
+        pass
+
+    def init_backends(self):
+        pass
+
     def __init__(
         self,
         server_args: ServerArgs,
