@@ -166,21 +166,27 @@ def _preflight_check_workspace_memory(
 ) -> bool:
     """Collectively decide whether to enter create_allreduce_fusion_workspace.
 
-    If one rank OOMs in flashinfer's per-rank fabric allocation and escapes
-    via the caller's try/except while another rank enters the internal
-    cross-rank collective, the surviving rank blocks until the NCCL
+    If one rank OOMs in flashinfer's per-rank cuMemCreate and escapes via
+    the caller's try/except while another rank enters the internal
+    cross-rank handle exchange, the surviving rank blocks until the NCCL
     watchdog aborts the process ~10 minutes later. This preflight has
     every rank probe a matching cuMemCreate locally and vote on a CPU
     group so all ranks either proceed or skip atomically.
 
-    torch.cuda.mem_get_info() is not a reliable signal: the fabric
-    pool can be smaller than the driver's generic free counter, so we
-    probe with the same handle type flashinfer uses.
+    torch.cuda.mem_get_info() is not a reliable signal on FABRIC-handle
+    systems (the fabric pool can be smaller than the driver's generic
+    free counter), so we probe with the same handle type flashinfer
+    will use -- FABRIC on devices where is_mnnvl_fabric_supported is
+    True (typically GB200), POSIX_FILE_DESCRIPTOR otherwise (H200/B200).
 
     Lifecycle note: the probe momentarily allocates a buffer the size of
     flashinfer's largest single allocation (the lamport buffer, capped at
     3 * MAX_COMM_SIZE ~= 6 GiB) and releases it immediately. Intended to
     run once at startup before the model occupies device memory.
+
+    Caveat: on POSIX_FD systems the probe doesn't model FD-table
+    exhaustion, which is a separate failure mode flashinfer can hit
+    across its three handle allocations.
     """
     # Setup: import + prop construction + granularity query. Any failure
     # here means the preflight can't run on this platform; fall through to
@@ -190,6 +196,21 @@ def _preflight_check_workspace_memory(
     try:
         import torch.distributed as dist
         from cuda import cuda as _cu
+        from flashinfer.comm.mnnvl import is_mnnvl_fabric_supported
+
+        # Match flashinfer's SymmDeviceMemory exchanger selection
+        # (mnnvl.py:949-957): FABRIC on systems with multi-node NVLink
+        # fabric initialized (e.g. GB200), POSIX_FD elsewhere (H200/B200).
+        # The hang surface is identical -- any per-rank cuMemCreate OOM
+        # that escapes via the caller's try/except while peers are blocked
+        # in the cross-rank handle exchange triggers the NCCL watchdog --
+        # so we must probe with whichever handle flashinfer will use.
+        if is_mnnvl_fabric_supported(torch.cuda.current_device()):
+            handle_type = _cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
+        else:
+            handle_type = (
+                _cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+            )
 
         dtype_bytes = torch.empty((), dtype=dtype).element_size()
         # Mirror flashinfer's lamport sizing in trtllm_ar.py: cap the
@@ -203,9 +224,7 @@ def _preflight_check_workspace_memory(
         probe_size = 3 * lamport_comm_size
 
         prop = _cu.CUmemAllocationProp()
-        prop.requestedHandleTypes = (
-            _cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
-        )
+        prop.requestedHandleTypes = handle_type
         prop.type = _cu.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
         prop.location = _cu.CUmemLocation()
         prop.location.type = _cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
@@ -218,8 +237,8 @@ def _preflight_check_workspace_memory(
         )
         if err != _cu.CUresult.CUDA_SUCCESS:
             # Fail closed: if the driver can't even tell us the granularity
-            # for a fabric handle, flashinfer's real allocation won't work
-            # either -- skip fusion rather than risk the 10-minute hang.
+            # for the chosen handle type, flashinfer's real allocation won't
+            # work either -- skip fusion rather than risk the 10-minute hang.
             logger.warning(
                 "FlashInfer workspace preflight: cuMemGetAllocationGranularity "
                 "failed (%s). Skipping allreduce fusion.",
