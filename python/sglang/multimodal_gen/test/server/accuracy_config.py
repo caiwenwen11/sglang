@@ -68,19 +68,6 @@ SKIP_COMPONENTS: Dict[str, Dict[ComponentType, ComponentSkip]] = {
             "HF AutoencoderDC checkpoint leaves required to_qkv_multiscale weights missing, so VAE transfer would compare against partially initialized reference weights"
         )
     },
-    "mova_360p_1gpu": {
-        ComponentType.TRANSFORMER: ComponentSkip(
-            "HF reference transformer cannot be materialized from the video_dit repo layout"
-        )
-    },
-    "ltx_2.3_one_stage_ti2v": {
-        ComponentType.VAE: ComponentSkip(
-            "LTX-2.3 VAE component diverges from the HF reference after local overlay materialization; weight transfer matched 96/176 (54.55%), below the minimum threshold for trustworthy comparison"
-        ),
-        ComponentType.TRANSFORMER: ComponentSkip(
-            "LTX-2.3 transformer component does not match the HF reference architecture after local overlay materialization; scale_shift_table parameters load as [9, ...] in the checkpoint but [6, ...] in the reference model"
-        ),
-    },
     "qwen_image_t2i_cache_dit_enabled": {
         ComponentType.VAE: ComponentSkip(
             "Representative VAE accuracy is already covered by qwen_image_t2i for the same source component and topology"
@@ -153,17 +140,6 @@ SKIP_COMPONENTS: Dict[str, Dict[ComponentType, ComponentSkip]] = {
         ),
         ComponentType.TEXT_ENCODER: ComponentSkip(
             "Representative text encoder accuracy is already covered by flux_2_image_t2i for the same source component and topology"
-        ),
-    },
-    "wan2_1_t2v_1.3b_text_encoder_cpu_offload": {
-        ComponentType.VAE: ComponentSkip(
-            "Representative VAE accuracy is already covered by wan2_1_t2v_1.3b for the same source component and topology"
-        ),
-        ComponentType.TRANSFORMER: ComponentSkip(
-            "Representative transformer accuracy is already covered by wan2_1_t2v_1.3b for the same source component and topology"
-        ),
-        ComponentType.TEXT_ENCODER: ComponentSkip(
-            "Representative text encoder accuracy is already covered by wan2_1_t2v_1.3b for the same source component and topology"
         ),
     },
     "wan2_1_t2v_1.3b_teacache_enabled": {
@@ -325,14 +301,6 @@ SKIP_COMPONENTS: Dict[str, Dict[ComponentType, ComponentSkip]] = {
         ),
     },
     "mova_360p_ring1_uly2": {
-        ComponentType.TRANSFORMER: ComponentSkip(
-            "HF reference transformer cannot be materialized from the MOVA video_dit repo layout"
-        ),
-        ComponentType.TEXT_ENCODER: ComponentSkip(
-            "Text encoder diverges from HF baseline in 2-GPU accuracy run (CosSim ~0.31) after 100% matched weight transfer"
-        ),
-    },
-    "mova_360p_ring2_uly1": {
         ComponentType.TRANSFORMER: ComponentSkip(
             "HF reference transformer cannot be materialized from the MOVA video_dit repo layout"
         ),
