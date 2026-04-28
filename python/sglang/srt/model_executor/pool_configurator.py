@@ -361,6 +361,11 @@ class MambaPoolConfigurator(MemoryPoolConfigurator):
         reserved_bytes = resident_bytes + intermediate_bytes
         if reserved_bytes >= available_bytes:
             dtype = config.mamba2_cache_params.dtype
+            mem_fraction_static = getattr(
+                self._mr,
+                "mem_fraction_static",
+                getattr(server_args, "mem_fraction_static", None),
+            )
             raise RuntimeError(
                 "Not enough memory for Mamba state pools. "
                 f"available={available_bytes / (1 << 30):.2f} GiB, "
@@ -369,6 +374,7 @@ class MambaPoolConfigurator(MemoryPoolConfigurator):
                 f"spec={intermediate_bytes / (1 << 30):.2f} GiB), "
                 f"max_running_requests={max_running_requests}, "
                 f"mamba_ratio={mamba_ratio}, "
+                f"mem_fraction_static={mem_fraction_static}, "
                 f"mamba_ssm_dtype={dtype.temporal}. "
                 "Try lowering --max-running-requests, changing "
                 "--mamba-ssm-dtype, or increasing --mem-fraction-static."
