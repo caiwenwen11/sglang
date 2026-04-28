@@ -375,12 +375,14 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.dflash_target_layer_ids = None
         self.dflash_draft_num_layers = None
         if (
-            self.spec_algorithm.is_eagle() or self.spec_algorithm.is_standalone()
-        ) and not self.is_draft_worker:
+            (self.spec_algorithm.is_eagle() or self.spec_algorithm.is_standalone())
+            and not self.is_draft_worker
+            and server_args.speculative_draft_model_path
+        ):
             # Load draft config to get layer count for KV cache sizing
             draft_model_config = self._build_model_config(
                 server_args,
-                model_path=(server_args.speculative_draft_model_path),
+                model_path=server_args.speculative_draft_model_path,
                 model_revision=server_args.speculative_draft_model_revision,
                 is_draft_model=True,
             )
