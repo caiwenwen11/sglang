@@ -266,7 +266,9 @@ def resolve_transformer_safetensors_to_load(
     quantized_path = server_args.transformer_weights_path
 
     if quantized_path:
-        quantized_path = maybe_download_model(quantized_path)
+        quantized_path = maybe_download_model(
+            quantized_path, validate_safetensors_shards=True
+        )
         logger.info("using quantized transformer weights from: %s", quantized_path)
         if os.path.isfile(quantized_path) and quantized_path.endswith(".safetensors"):
             safetensors_list = [quantized_path]
@@ -451,7 +453,9 @@ def _resolve_quant_config_from_transformer_override(
     ):
         return None
 
-    override_quantized_path = maybe_download_model(transformer_weights_path)
+    override_quantized_path = maybe_download_model(
+        transformer_weights_path, validate_safetensors_shards=True
+    )
     if not os.path.isdir(override_quantized_path):
         return None
 

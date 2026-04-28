@@ -3,6 +3,7 @@ This unittest is introduced in #22360, preventing duplicate transformer safetens
 """
 
 import json
+import os
 import sys
 import tempfile
 import types
@@ -58,6 +59,7 @@ from sglang.multimodal_gen.runtime.loader.transformer_load_utils import (
     resolve_transformer_safetensors_to_load,
 )
 from sglang.multimodal_gen.runtime.models.dits.flux import FluxSingleTransformerBlock
+from sglang.multimodal_gen.runtime.utils import hf_diffusers_utils
 from sglang.multimodal_gen.tools.build_modelopt_nvfp4_transformer import (
     _updated_quant_config,
 )
@@ -119,6 +121,59 @@ class TestTransformerQuantHelpers(unittest.TestCase):
             )
 
         self.assertEqual(resolved, [mixed])
+
+    @patch(
+        "sglang.multimodal_gen.runtime.loader.transformer_load_utils.maybe_download_model",
+        side_effect=lambda path, **kw: path,
+    )
+    def test_resolve_transformer_safetensors_to_load_validates_override_shards(
+        self, mock_download
+    ):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shard = f"{tmpdir}/diffusion_pytorch_model-00001-of-00001.safetensors"
+            open(shard, "a").close()
+
+            server_args = self._make_server_args(transformer_weights_path=tmpdir)
+            resolved = resolve_transformer_safetensors_to_load(
+                server_args, "/unused/component/path"
+            )
+
+        self.assertEqual(resolved, [shard])
+        mock_download.assert_called_once_with(
+            tmpdir, validate_safetensors_shards=True
+        )
+
+    def test_maybe_download_model_redownloads_incomplete_component_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_dir = os.path.join(
+                tmpdir, "models--org--repo", "snapshots", "abc"
+            )
+            index_name = "diffusion_pytorch_model.safetensors.index.json"
+            shard_name = "diffusion_pytorch_model-00001-of-00001.safetensors"
+
+            def write_snapshot(with_shard: bool):
+                os.makedirs(snapshot_dir, exist_ok=True)
+                with open(os.path.join(snapshot_dir, index_name), "w") as f:
+                    json.dump({"weight_map": {"x.weight": shard_name}}, f)
+                if with_shard:
+                    open(os.path.join(snapshot_dir, shard_name), "a").close()
+
+            def fake_snapshot_download(**kwargs):
+                write_snapshot(with_shard=not kwargs.get("local_files_only", False))
+                return snapshot_dir
+
+            with patch.object(
+                hf_diffusers_utils,
+                "snapshot_download",
+                side_effect=fake_snapshot_download,
+            ) as mock_snapshot_download:
+                resolved = hf_diffusers_utils.maybe_download_model(
+                    "org/repo", validate_safetensors_shards=True
+                )
+
+        self.assertEqual(resolved, snapshot_dir)
+        self.assertTrue(os.path.exists(os.path.join(snapshot_dir, shard_name)))
+        self.assertEqual(mock_snapshot_download.call_count, 2)
 
     def test_filter_transformer_precision_variants_prefers_canonical_file(self):
         files = [

@@ -211,6 +211,34 @@ def _ci_validate_diffusers_model(model_path: str) -> tuple[bool, bool]:
     return True, False
 
 
+def _validate_safetensors_shards(model_path: str) -> tuple[bool, bool]:
+    is_valid, missing_files, checked_subdirs = _check_index_files_for_missing_shards(
+        model_path
+    )
+    if is_valid:
+        if checked_subdirs:
+            logger.info(
+                "Safetensors shard validation passed for %s. Checked subdirectories: %s",
+                model_path,
+                checked_subdirs,
+            )
+        return True, False
+
+    logger.error(
+        "Safetensors shard validation failed for %s. Missing %d file(s): %s. "
+        "Checked subdirectories: %s",
+        model_path,
+        len(missing_files),
+        missing_files[:5] if len(missing_files) > 5 else missing_files,
+        checked_subdirs,
+    )
+    cleanup_performed = _cleanup_model_cache(
+        model_path,
+        f"Missing {len(missing_files)} shard file(s): {missing_files[:3]}",
+    )
+    return False, cleanup_performed
+
+
 def _verify_diffusers_model_complete(path: str) -> bool:
     """Check if a diffusers model directory has all required component subdirectories."""
     config_path = os.path.join(path, "model_index.json")
@@ -317,7 +345,7 @@ def load_dict(file_path):
 def prepare_diffusers_component_path_for_loading(component_path: str) -> str:
     """Download component repos if needed and patch legacy flat ModelOpt configs."""
     local_component_path = (
-        maybe_download_model(component_path)
+        maybe_download_model(component_path, validate_safetensors_shards=True)
         if not os.path.exists(component_path)
         else component_path
     )
@@ -626,6 +654,7 @@ def maybe_download_model(
     allow_patterns: list[str] | None = None,
     force_diffusers_model: bool = False,
     skip_overlay_resolution: bool = False,
+    validate_safetensors_shards: bool = False,
 ) -> str:
     """
     Check if the model path is a Hugging Face Hub model ID and download it if needed.
@@ -636,6 +665,8 @@ def maybe_download_model(
         download: Whether to download the model from Hugging Face Hub
         is_lora: If True, skip model completeness verification (LoRA models don't have transformer/vae directories)
         force_diffusers_model: If True, apply diffusers model check. Otherwise it should be a component model
+        validate_safetensors_shards: If True, verify safetensors index shards
+            and repair corrupt HF cache snapshots
     Returns:
         Local path to the model
     """
@@ -656,6 +687,13 @@ def maybe_download_model(
 
     # 1. Local path check: if path exists locally, verify it's complete (skip for LoRA)
     if os.path.exists(model_name_or_path):
+        if validate_safetensors_shards:
+            is_valid, _ = _validate_safetensors_shards(model_name_or_path)
+            if not is_valid:
+                raise ValueError(
+                    f"Safetensors shard validation failed for local model at {model_name_or_path}. "
+                    "Some safetensors shards are missing."
+                )
         if not force_diffusers_model:
             return model_name_or_path
         if is_lora or _verify_diffusers_model_complete(model_name_or_path):
@@ -703,7 +741,24 @@ def maybe_download_model(
             local_files_only=True,
             max_workers=8,
         )
-        if not force_diffusers_model:
+        if validate_safetensors_shards:
+            is_valid, cleanup_performed = _validate_safetensors_shards(local_path)
+            if not is_valid:
+                if cleanup_performed:
+                    logger.warning(
+                        "Safetensors shard validation failed for cached model at %s; "
+                        "cache has been cleaned up, will re-download",
+                        local_path,
+                    )
+                else:
+                    raise ValueError(
+                        f"Safetensors shard validation failed for cached model at {local_path}. "
+                        "Some safetensors shards are missing. "
+                        "Please manually delete the model directory and retry."
+                    )
+            elif not force_diffusers_model:
+                return str(local_path)
+        elif not force_diffusers_model:
             return str(local_path)
         if is_lora or _verify_diffusers_model_complete(local_path):
             if not is_lora:
@@ -771,6 +826,22 @@ def maybe_download_model(
                 )
 
             if not force_diffusers_model:
+                if validate_safetensors_shards:
+                    is_valid, cleanup_performed = _validate_safetensors_shards(
+                        local_path
+                    )
+                    if not is_valid:
+                        if cleanup_performed and attempt < MAX_RETRIES - 1:
+                            logger.warning(
+                                "Safetensors shard validation failed after download "
+                                "for %s; cache has been cleaned up, retrying",
+                                local_path,
+                            )
+                            continue
+                        raise ValueError(
+                            f"Safetensors shard validation failed for downloaded model at {local_path}. "
+                            f"Some safetensors shards are missing. Cleanup performed: {cleanup_performed}."
+                        )
                 return str(local_path)
             # Verify downloaded model is complete (skip for LoRA)
             elif not is_lora and not _verify_diffusers_model_complete(local_path):

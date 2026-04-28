@@ -258,7 +258,9 @@ class ComposedPipelineBase(ABC):
         override_path = server_args.component_paths.get(module_name)
         if override_path is not None:
             # overridden with args like --vae-path
-            component_model_path = maybe_download_model(override_path)
+            component_model_path = maybe_download_model(
+                override_path, validate_safetensors_shards=True
+            )
         else:
             component_model_path = os.path.join(self.model_path, load_module_name)
 
