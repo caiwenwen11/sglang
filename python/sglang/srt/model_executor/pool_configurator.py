@@ -304,11 +304,11 @@ class DSv4PoolConfigurator(MemoryPoolConfigurator):
     """Configurator for DSv4 compressed-attention models.
 
     Splits available memory across full / swa / c4 / c128 + c4_state / c128_state
-    pools. coeff is bytes_per_full_token; bias = 0.
+    pools. coeff is bytes_per_full_token (inflated by (T+D)/T when speculative
+    decode reserves a draft worker, mirroring dflash's cell_size scaling); bias = 0.
     """
 
     def __init__(self, mr: ModelRunner):
-        self._mr = mr
         cfg = mr.model_config
         self.qk_nope_head_dim = cfg.qk_nope_head_dim
         self.qk_rope_head_dim = cfg.qk_rope_head_dim
@@ -394,7 +394,7 @@ class DSv4PoolConfigurator(MemoryPoolConfigurator):
             * self.num_layers_ca4
         )
 
-    def _solve_pool_sizes(self, full_token: int, page_size: int) -> _DSv4PoolSizes:
+    def _compute_dsv4_sizes(self, full_token: int, page_size: int) -> _DSv4PoolSizes:
         full_token = full_token // page_size * page_size
         swa_tokens = int(full_token * self.swa_ratio) // page_size * page_size
         return _DSv4PoolSizes(
@@ -434,7 +434,7 @@ class DSv4PoolConfigurator(MemoryPoolConfigurator):
         ), "page_size must be multiple of 128 for compressed attention"
 
         full_token = int(available_bytes / self.bytes_per_full_token)
-        sizes = self._solve_pool_sizes(full_token, page_size)
+        sizes = self._compute_dsv4_sizes(full_token, page_size)
         logger.info(
             f"DSv4 memory calculation: "
             f"bytes_per_full_token={self.bytes_per_full_token:.2f}, "
@@ -449,7 +449,7 @@ class DSv4PoolConfigurator(MemoryPoolConfigurator):
         assert (
             page_size % 128 == 0
         ), "page_size must be multiple of 128 for compressed attention"
-        sizes = self._solve_pool_sizes(max_total_num_tokens, page_size)
+        sizes = self._compute_dsv4_sizes(max_total_num_tokens, page_size)
         return self._to_config(sizes)
 
 
