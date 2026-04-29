@@ -107,10 +107,9 @@ env:
   DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
 concurrency:
-  # When called via workflow_call with ref set, use a unique group per caller run to avoid
-  # collisions with direct schedule/push triggers. We use inputs.ref (not github.event_name)
-  # to detect this, because github.event_name inherits from the caller in workflow_call.
-  group: nightly-test-amd-rocm720-${{ inputs.ref && format('caller-{0}', github.run_id) || github.ref }}
+  # Workflow_call runs get a unique group per caller run. Direct triggers include
+  # the event name so manual dispatches on main do not cancel scheduled runs.
+  group: nightly-test-amd-rocm720-${{ inputs.ref && format('caller-{0}', github.run_id) || format('{0}-{1}', github.event_name, github.ref) }}
   cancel-in-progress: ${{ !inputs.ref && github.event_name != 'workflow_call' }}
 
 jobs:
