@@ -79,5 +79,28 @@ def test_qknorm_across_heads(batch_size: int, hidden_dim: int) -> None:
     triton.testing.assert_close(q_k_jit[1], q_k_aot[1], atol=1e-2, rtol=1e-2)
 
 
+def test_apply_qk_norm_across_heads_helper() -> None:
+    from sglang.multimodal_gen.runtime.layers.layernorm import (
+        RMSNorm,
+        apply_qk_norm_across_heads,
+    )
+
+    batch_size = 257
+    hidden_dim = 4096
+    q = torch.randn(batch_size, hidden_dim, device=DEVICE, dtype=DTYPE)
+    k = torch.randn(batch_size, hidden_dim, device=DEVICE, dtype=DTYPE)
+    q_norm = RMSNorm(hidden_dim, eps=1e-6).to(device=DEVICE, dtype=DTYPE)
+    k_norm = RMSNorm(hidden_dim, eps=1e-6).to(device=DEVICE, dtype=DTYPE)
+
+    q_ref = q_norm(q.clone())
+    k_ref = k_norm(k.clone())
+    q_out, k_out = apply_qk_norm_across_heads(
+        q.clone(), k.clone(), q_norm, k_norm
+    )
+
+    triton.testing.assert_close(q_out, q_ref, atol=1e-2, rtol=1e-2)
+    triton.testing.assert_close(k_out, k_ref, atol=1e-2, rtol=1e-2)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v", "-s"]))

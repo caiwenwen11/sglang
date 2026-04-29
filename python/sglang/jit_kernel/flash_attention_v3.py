@@ -16,7 +16,18 @@ SGL_FA3_KERNEL_REVISION = "v1"
 DEFAULT_FA3_KERNEL_LOCKFILE = "kernels.lock"
 
 
-def _call_fa3_kernel(kernel, *args, out=None):
+def _call_fa3_kernel(kernel, *args, out=None, **kwargs):
+    if kwargs:
+        if out is not None:
+            kwargs["out"] = out
+        try:
+            return kernel(**kwargs)
+        except TypeError as exc:
+            if out is None or "unexpected keyword argument 'out'" not in str(exc):
+                raise
+            kwargs.pop("out", None)
+            return kernel(**kwargs)
+
     if out is None:
         return kernel(*args)
     try:
@@ -212,7 +223,8 @@ def flash_attn_varlen_func(
             "flash_attn at sgl-kernel is only supported on sm90 and above"
         )
 
-    return _load_fa3_kernels()["flash_attn_varlen_func"](
+    return _call_fa3_kernel(
+        _load_fa3_kernels()["flash_attn_varlen_func"],
         q=q,
         k=k,
         v=v,
