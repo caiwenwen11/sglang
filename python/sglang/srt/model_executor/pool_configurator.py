@@ -335,12 +335,14 @@ class DSv4PoolConfigurator(MemoryPoolConfigurator):
         self.num_layers_ca128 = sum(1 for r in self.compression_ratios if r == 128)
 
         self.bytes_per_full_token = self._get_bytes_per_full_token()
-
-        # Compressed attention always stores c4/c128 states in fp32. _init_pools
-        # reads self.state_dtype when constructing DeepSeekV4TokenToKVPool.
-        mr.state_dtype = torch.float32
-        logger.info(f"DSv4 compressed attention: kv_cache_dtype={mr.kv_cache_dtype}")
-        logger.info(f"DSv4 compressed attention: state_dtype={mr.state_dtype}")
+        if self.is_speculative:
+            # Reserve memory for the speculative draft worker by inflating
+            # per-token bytes by (target+draft)/target. Equivalent to dflash's
+            # scale_kv_cell_size_per_token_for_dflash but applied to
+            # bytes_per_full_token: tokens = avail / (bpft * (T+D)/T).
+            draft_layers = 1
+            target_layers = self.num_layers_total
+            self.bytes_per_full_token *= (target_layers + draft_layers) / target_layers
 
         # Online c128 keeps a single in-progress (max, sum, kv) state per index
         # and assumes a strict forward-only schedule. Speculative decode (MTP)
@@ -430,14 +432,6 @@ class DSv4PoolConfigurator(MemoryPoolConfigurator):
         assert (
             page_size % 128 == 0
         ), "page_size must be multiple of 128 for compressed attention"
-
-        if self.is_speculative:
-            # Reserve memory for the speculative draft worker's layers.
-            draft_layers = 1
-            target_layers = self.num_layers_total
-            available_bytes = int(
-                available_bytes * target_layers / (target_layers + draft_layers)
-            )
 
         full_token = int(available_bytes / self.bytes_per_full_token)
         sizes = self._solve_pool_sizes(full_token, page_size)
