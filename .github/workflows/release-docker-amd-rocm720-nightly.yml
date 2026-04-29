@@ -86,8 +86,10 @@ jobs:
 
           tag=v${version}-${rocm_tag}
           tag_suffix="-${{ env.IMAGE_TAG_SUFFIX }}"
-          echo "IMAGE_TAG=${tag}-${{ env.DATE }}${tag_suffix}" >> $GITHUB_ENV
+          image_tag="${tag}-${{ env.DATE }}${tag_suffix}"
+          echo "IMAGE_TAG=${image_tag}" >> $GITHUB_ENV
+          echo "Image tag: ${image_tag}"
 
           # remove --build-arg NIC_BACKEND=ainic for auto detection nic support in mori
-          docker build . -f docker/rocm.Dockerfile --build-arg SGL_BRANCH=${{ github.ref_name }} --build-arg BUILD_TYPE=${{ matrix.build_type }} --build-arg GPU_ARCH=${{ matrix.gpu_arch }} --build-arg ENABLE_MORI=1 --build-arg SETUPTOOLS_SCM_PRETEND_VERSION=${pretend_version} -t rocm/sgl-dev:${{ env.IMAGE_TAG }} --no-cache
-          docker push rocm/sgl-dev:${{ env.IMAGE_TAG }}
+          docker build . -f docker/rocm.Dockerfile --build-arg SGL_BRANCH=${{ github.ref_name }} --build-arg BUILD_TYPE=${{ matrix.build_type }} --build-arg GPU_ARCH=${{ matrix.gpu_arch }} --build-arg ENABLE_MORI=1 --build-arg SETUPTOOLS_SCM_PRETEND_VERSION=${pretend_version} -t "rocm/sgl-dev:${image_tag}" --no-cache
+          docker push "rocm/sgl-dev:${image_tag}"
