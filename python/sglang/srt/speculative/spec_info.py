@@ -74,11 +74,6 @@ class SpeculativeAlgorithm(Enum):
             validate_server_args=validate_server_args,
         )
 
-    @classmethod
-    def get_registered_spec(cls, name: Optional[str]) -> Optional[CustomSpecAlgo]:
-        """Plugin spec for ``name``; ``None`` for builtin or unknown."""
-        return _get_registered_spec(name)
-
     def is_none(self) -> bool:
         return self == SpeculativeAlgorithm.NONE
 

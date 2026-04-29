@@ -3244,16 +3244,19 @@ class ServerArgs:
 
         if self.speculative_algorithm is not None:
             from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+            from sglang.srt.speculative.spec_registry import CustomSpecAlgo
 
             self.speculative_algorithm = self.speculative_algorithm.upper()
             if self.speculative_algorithm == "NEXTN":
                 self.speculative_algorithm = "EAGLE"
-            SpeculativeAlgorithm.from_string(self.speculative_algorithm)
-            spec = SpeculativeAlgorithm.get_registered_spec(self.speculative_algorithm)
+            algo = SpeculativeAlgorithm.from_string(self.speculative_algorithm)
 
             # TODO: move the per-algorithm validation below into spec module hooks.
-            if spec is not None and spec.validate_server_args is not None:
-                spec.validate_server_args(self)
+            if (
+                isinstance(algo, CustomSpecAlgo)
+                and algo.validate_server_args is not None
+            ):
+                algo.validate_server_args(self)
 
         if self.speculative_algorithm == "DFLASH":
             if self.enable_dp_attention:

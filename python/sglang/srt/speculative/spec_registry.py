@@ -1,6 +1,5 @@
-"""Internal storage backing ``SpeculativeAlgorithm.register`` /
-``SpeculativeAlgorithm.get_registered_spec``. Plugins should use that
-classmethod API; do not import from this module directly.
+"""Internal storage backing ``SpeculativeAlgorithm.register``. Plugins
+should use that classmethod API; do not import from this module directly.
 """
 
 from __future__ import annotations
