@@ -59,9 +59,12 @@ class SpeculativeAlgorithm(Enum):
         *,
         supports_overlap: bool = False,
         validate_server_args: Optional[ServerArgsValidator] = None,
+        spec_class: Type[CustomSpecAlgo] = CustomSpecAlgo,
     ) -> Callable[[WorkerFactory], WorkerFactory]:
         """Decorator to register a plugin speculative algorithm. The factory
-        takes ``server_args`` and returns the worker class.
+        takes ``server_args`` and returns the worker class. Pass a
+        ``CustomSpecAlgo`` subclass via ``spec_class`` to override any
+        ``is_*()`` / ``create_worker`` method.
 
         Example:
             @SpeculativeAlgorithm.register("MY_SPEC", supports_overlap=False)
@@ -72,6 +75,7 @@ class SpeculativeAlgorithm(Enum):
             name,
             supports_overlap=supports_overlap,
             validate_server_args=validate_server_args,
+            spec_class=spec_class,
         )
 
     def is_none(self) -> bool:
