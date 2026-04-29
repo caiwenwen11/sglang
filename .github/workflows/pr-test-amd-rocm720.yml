@@ -63,6 +63,11 @@ on:
         required: false
         type: string
         default: ''
+      custom_image:
+        description: 'Use a custom AMD CI Docker image for all test jobs (optional)'
+        required: false
+        type: string
+        default: ''
       continue_on_error:
         description: 'Continue on error (do not fail the workflow on test failures)'
         required: false
@@ -85,6 +90,11 @@ on:
         required: false
         type: string
         default: ''
+      custom_image:
+        description: 'Use a custom AMD CI Docker image for all test jobs (optional)'
+        required: false
+        type: string
+        default: ''
       continue_on_error:
         description: 'Continue on error (do not fail the workflow on test failures)'
         required: false
@@ -93,6 +103,7 @@ on:
 
 env:
   AITER_COMMIT_OVERRIDE: ${{ inputs.aiter_ref }}
+  AMD_CI_CUSTOM_IMAGE: ${{ inputs.custom_image || '' }}
   DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
   DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
