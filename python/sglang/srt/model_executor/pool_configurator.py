@@ -1,32 +1,297 @@
-"""Memory pool configurator for DSv4 compressed-attention models.
+"""Memory pool configurators for profiling and sizing KV cache pools.
 
-Resolves full / swa / c4 / c128 + c4_state / c128_state pool sizes from
-available GPU memory. Used by ``ModelRunnerKVCacheMixin._resolve_memory_pool_config``
-when the model is DSv4 compressed and hybrid SWA.
+Each model architecture has its own configurator that computes pool sizes
+from available GPU memory using a unified coeff+bias model:
+
+    available_bytes = max_tokens * coeff + bias
+    max_tokens = (available_bytes - bias) / coeff
+
+Two entry points, same core computation:
+- calculate_pool_sizes(available_bytes, page_size): profiling path
+- calculate_pool_sizes_from_max_tokens(max_tokens, page_size): constraint path
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from sglang.srt.distributed.parallel_state import get_world_group
+from sglang.srt.configs.model_config import (
+    get_nsa_index_head_dim,
+    is_deepseek_compressed,
+    is_deepseek_nsa,
+)
 from sglang.srt.environ import envs
+from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.mem_cache.deepseekv4_memory_pool import get_compress_state_ring_size
-from sglang.srt.utils.common import get_available_gpu_memory
+from sglang.srt.mem_cache.memory_pool import NSATokenToKVPool
+from sglang.srt.utils.common import is_float4_e2m1fn_x2
+
+
+@dataclass
+class MemoryPoolConfig:
+    """Resolved memory pool config, shared between target and draft workers."""
+
+    max_total_num_tokens: int
+    max_running_requests: Optional[int] = None
+    full_max_total_num_tokens: Optional[int] = None
+    swa_max_total_num_tokens: Optional[int] = None
+
+    # DSv4 compressed-attention pool sizes (target only; draft workers leave at 0).
+    c4_max_total_num_tokens: int = 0
+    c128_max_total_num_tokens: int = 0
+    c4_state_pool_size: int = 0
+    c128_state_pool_size: int = 0
+
+    mem_fraction_static: Optional[float] = None
+
+    def __post_init__(self):
+        if self.max_total_num_tokens <= 0:
+            msg = "Not enough memory. Please try to increase --mem-fraction-static."
+            if self.mem_fraction_static is not None:
+                msg += f" Current value: mem_fraction_static={self.mem_fraction_static}"
+            raise RuntimeError(msg)
+
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
-    from sglang.srt.model_executor.model_runner_kv_cache_mixin import MemoryPoolConfig
 
 logger = logging.getLogger(__name__)
 
 
+class MemoryPoolConfigurator:
+    """Base class for memory pool configurators.
+
+    Subclasses compute pool sizes for their architecture via coeff+bias model.
+    Both entry points return MemoryPoolConfig (with max_running_requests=None,
+    to be filled by the consumer).
+    """
+
+    def calculate_pool_sizes(
+        self, available_bytes: int, page_size: int
+    ) -> MemoryPoolConfig:
+        """Profiling path: compute pool sizes from available bytes."""
+        raise NotImplementedError
+
+    def calculate_pool_sizes_from_max_tokens(
+        self, max_total_num_tokens: int, page_size: int
+    ) -> MemoryPoolConfig:
+        """Constraint path: recalculate pool sizes from a constrained max_tokens."""
+        raise NotImplementedError
+
+
+class DefaultPoolConfigurator(MemoryPoolConfigurator):
+    """Configurator for standard models: MHA, MLA, NSA, FP4.
+
+    coeff = cell_size (bytes per token across all layers)
+    bias = 0
+    """
+
+    def __init__(self, mr: ModelRunner):
+        # Determine effective number of layers for KV cache
+        if mambaish := mr.mambaish_config:
+            effective_layer_ids = [
+                i
+                for i in mambaish.full_attention_layer_ids
+                if mr.start_layer <= i < mr.end_layer
+            ]
+            num_layers = len(effective_layer_ids)
+        else:
+            num_layers = mr.num_effective_layers
+
+        self._cell_size = self._compute_cell_size(mr, num_layers)
+
+        # DFLASH: scale cell_size to account for draft model KV cache
+        if mr.spec_algorithm.is_dflash() and not mr.is_draft_worker:
+            from sglang.srt.speculative.dflash_utils import (
+                scale_kv_cell_size_per_token_for_dflash,
+            )
+
+            draft_num_layers = getattr(mr, "dflash_draft_num_layers", None)
+            if (
+                draft_num_layers is not None
+                and int(draft_num_layers) > 0
+                and int(num_layers) > 0
+            ):
+                self._cell_size = scale_kv_cell_size_per_token_for_dflash(
+                    target_cell_size_per_token=self._cell_size,
+                    target_num_layers=int(num_layers),
+                    draft_num_layers=int(draft_num_layers),
+                )
+
+    def _compute_cell_size(self, mr: ModelRunner, num_layers: int) -> int:
+        """Compute per-token KV cache cost in bytes. Subclasses can override."""
+        # args to config cell size
+        model_config = mr.model_config
+        kv_cache_dtype = mr.kv_cache_dtype
+
+        kv_size = torch._utils._element_size(kv_cache_dtype)
+        tp_size = get_attention_tp_size()
+
+        if mr.use_mla_backend:
+            cell_size = (
+                (model_config.kv_lora_rank + model_config.qk_rope_head_dim)
+                * num_layers
+                * kv_size
+            )
+            if is_float4_e2m1fn_x2(kv_cache_dtype):
+                # kv_scale_buffer
+                scale_block_size = 16
+                cell_size = (cell_size // 2) + (
+                    (
+                        (model_config.kv_lora_rank + model_config.qk_rope_head_dim)
+                        // scale_block_size
+                    )
+                    * num_layers
+                    * kv_size
+                )
+
+            # Add indexer KV cache overhead for NSA models (DeepSeek V3.2)
+            if is_deepseek_nsa(model_config.hf_config):
+                index_head_dim = get_nsa_index_head_dim(model_config.hf_config)
+                indexer_size_per_token = (
+                    index_head_dim
+                    + index_head_dim // NSATokenToKVPool.quant_block_size * 4
+                )
+                element_size = torch._utils._element_size(
+                    NSATokenToKVPool.index_k_with_scale_buffer_dtype
+                )
+                cell_size += indexer_size_per_token * num_layers * element_size
+        else:
+            cell_size = (
+                model_config.get_num_kv_heads(tp_size)
+                * (model_config.head_dim + model_config.v_head_dim)
+                * num_layers
+                * kv_size
+            )
+
+            if is_float4_e2m1fn_x2(kv_cache_dtype):
+                # kv_scale_buffer
+                scale_block_size = 16
+                n = model_config.get_num_kv_heads(tp_size)
+                k = model_config.head_dim
+                cell_size = (cell_size // 2) + (
+                    (n * k * num_layers * 2 * kv_size) // scale_block_size
+                )
+
+        return cell_size
+
+    def calculate_pool_sizes(
+        self, available_bytes: int, page_size: int
+    ) -> MemoryPoolConfig:
+        max_total_num_tokens = available_bytes // self._cell_size
+        max_total_num_tokens = max_total_num_tokens // page_size * page_size
+        return MemoryPoolConfig(max_total_num_tokens=max_total_num_tokens)
+
+    def calculate_pool_sizes_from_max_tokens(
+        self, max_total_num_tokens: int, page_size: int
+    ) -> MemoryPoolConfig:
+        max_total_num_tokens = max_total_num_tokens // page_size * page_size
+        return MemoryPoolConfig(max_total_num_tokens=max_total_num_tokens)
+
+
+class HybridSWAPoolConfigurator(MemoryPoolConfigurator):
+    """Configurator for hybrid sliding window attention models (Gemma2, Command-R, MiMo).
+
+    Splits available memory between full attention and SWA pools.
+    Does NOT inherit DefaultPoolConfigurator — different coeff model.
+    """
+
+    def __init__(self, mr: ModelRunner):
+        model_config = mr.model_config
+        kv_cache_dtype = mr.kv_cache_dtype
+        kv_size = torch._utils._element_size(kv_cache_dtype)
+        tp_size = get_attention_tp_size()
+
+        self._full_layers_num = len(model_config.full_attention_layer_ids)
+        self._swa_layers_num = len(model_config.swa_attention_layer_ids)
+        assert (
+            self._swa_layers_num > 0
+        ), "Hybrid SWA model must have at least one SWA layer"
+
+        self._swa_full_tokens_ratio = mr.server_args.swa_full_tokens_ratio
+
+        # Full layer per-token memory (bytes)
+        self._full_per_token = (
+            model_config.get_num_kv_heads(tp_size)
+            * (model_config.head_dim + model_config.v_head_dim)
+            * kv_size
+        )
+
+        # SWA layer per-token memory (bytes)
+        self._swa_per_token = (
+            model_config.get_swa_num_kv_heads(tp_size)
+            * (model_config.swa_head_dim + model_config.swa_v_head_dim)
+            * kv_size
+        )
+
+        # Bytes per max_total_num_token.
+        # For hybrid (full_layers > 0): full_tokens * _cell_size = total memory for both pools.
+        # For all-SWA (full_layers == 0): swa_tokens * _cell_size = total SWA memory.
+        if self._full_layers_num == 0:
+            self._cell_size = self._swa_per_token * self._swa_layers_num
+        else:
+            self._cell_size = (
+                self._full_per_token * self._full_layers_num
+                + self._swa_full_tokens_ratio
+                * self._swa_per_token
+                * self._swa_layers_num
+            )
+
+    def _solve_pool_sizes(
+        self, max_total_num_tokens: int, page_size: int
+    ) -> MemoryPoolConfig:
+        """Core computation: split max_total_num_tokens into full/swa pool sizes."""
+
+        def align_page_size(x: int) -> int:
+            return (x // page_size) * page_size
+
+        if self._full_layers_num == 0:
+            # All layers are SWA — no full pool needed
+            swa_tokens = align_page_size(max_total_num_tokens)
+            logger.info(
+                f"Use sliding window memory pool (all SWA). "
+                f"swa_layer_tokens={swa_tokens}"
+            )
+            return MemoryPoolConfig(
+                max_total_num_tokens=swa_tokens,
+                full_max_total_num_tokens=0,
+                swa_max_total_num_tokens=swa_tokens,
+            )
+
+        # full_tokens = max_total_num_tokens (page aligned)
+        # swa_tokens = full_tokens * ratio (page aligned)
+        full_tokens = align_page_size(max_total_num_tokens)
+        swa_tokens = align_page_size(int(full_tokens * self._swa_full_tokens_ratio))
+
+        logger.info(
+            f"Use sliding window memory pool. "
+            f"full_layer_tokens={full_tokens}, swa_layer_tokens={swa_tokens}"
+        )
+
+        return MemoryPoolConfig(
+            max_total_num_tokens=full_tokens,
+            full_max_total_num_tokens=full_tokens,
+            swa_max_total_num_tokens=swa_tokens,
+        )
+
+    def calculate_pool_sizes(
+        self, available_bytes: int, page_size: int
+    ) -> MemoryPoolConfig:
+        max_total_num_tokens = int(available_bytes // self._cell_size)
+        return self._solve_pool_sizes(max_total_num_tokens, page_size)
+
+    def calculate_pool_sizes_from_max_tokens(
+        self, max_total_num_tokens: int, page_size: int
+    ) -> MemoryPoolConfig:
+        return self._solve_pool_sizes(max_total_num_tokens, page_size)
+
+
 @dataclass
-class DSv4PoolSizes:
+class _DSv4PoolSizes:
     full_max_total_num_tokens: int
     swa_max_total_num_tokens: int
     c4_max_total_num_tokens: int
@@ -35,12 +300,11 @@ class DSv4PoolSizes:
     c128_state_pool_size: int
 
 
-class DSv4PoolConfigurator:
-    """Resolves DSv4 compressed-attention pool sizes into a ``MemoryPoolConfig``.
+class DSv4PoolConfigurator(MemoryPoolConfigurator):
+    """Configurator for DSv4 compressed-attention models.
 
-    Replaces the legacy ``DSv4MemoryCalculator`` (memory_profiler.py) +
-    ``set_num_tokens_hybrid_swa_compress`` (mixin method) split: one class
-    that owns both the byte-budget math and the resolve-into-config flow.
+    Splits available memory across full / swa / c4 / c128 + c4_state / c128_state
+    pools. coeff is bytes_per_full_token; bias = 0.
     """
 
     def __init__(self, mr: ModelRunner):
@@ -51,7 +315,6 @@ class DSv4PoolConfigurator:
         self.indexer_head_dim = cfg.index_head_dim
         self.compression_ratios = cfg.compress_ratios
         self.swa_page_size = cfg.window_size
-        self.page_size = mr.server_args.page_size
         self.swa_ratio = mr.server_args.swa_full_tokens_ratio
         self.is_speculative = mr.server_args.speculative_algorithm is not None
         self.c4_shrink_factor = (
@@ -64,10 +327,6 @@ class DSv4PoolConfigurator:
                 f"(set via SGLANG_OPT_HISPARSE_C4_SHRINK)"
             )
 
-        assert (
-            self.page_size % 128 == 0
-        ), "page_size must be multiple of 128 for compressed attention"
-
         self.c4_ring_size = get_compress_state_ring_size(4, self.is_speculative)
         self.c128_ring_size = get_compress_state_ring_size(128, self.is_speculative)
 
@@ -76,6 +335,22 @@ class DSv4PoolConfigurator:
         self.num_layers_ca128 = sum(1 for r in self.compression_ratios if r == 128)
 
         self.bytes_per_full_token = self._get_bytes_per_full_token()
+
+        # Compressed attention always stores c4/c128 states in fp32. _init_pools
+        # reads self.state_dtype when constructing DeepSeekV4TokenToKVPool.
+        mr.state_dtype = torch.float32
+        logger.info(f"DSv4 compressed attention: kv_cache_dtype={mr.kv_cache_dtype}")
+        logger.info(f"DSv4 compressed attention: state_dtype={mr.state_dtype}")
+
+        # Online c128 keeps a single in-progress (max, sum, kv) state per index
+        # and assumes a strict forward-only schedule. Speculative decode (MTP)
+        # would need rollback / replay across draft and verify, which the
+        # online path doesn't support yet.
+        if envs.SGLANG_OPT_USE_ONLINE_COMPRESS.get():
+            assert (
+                mr.spec_algorithm.is_none()
+            ), "SGLANG_OPT_USE_ONLINE_COMPRESS does not support speculative decode (MTP) yet"
+            logger.info("DSv4 compressed attention: online c128 enabled (ring_size=1)")
 
     def _get_bytes_per_full_token(self) -> float:
         kv_bytes = self.qk_nope_head_dim + self.qk_rope_head_dim * 2 + 8
@@ -117,12 +392,10 @@ class DSv4PoolConfigurator:
             * self.num_layers_ca4
         )
 
-    def _calculate_pool_sizes(self, available_bytes: int) -> DSv4PoolSizes:
-        full_token = int(available_bytes / self.bytes_per_full_token)
-        full_token = full_token // self.page_size * self.page_size
-        swa_tokens = int(full_token * self.swa_ratio) // self.page_size * self.page_size
-
-        pool_sizes = DSv4PoolSizes(
+    def _solve_pool_sizes(self, full_token: int, page_size: int) -> _DSv4PoolSizes:
+        full_token = full_token // page_size * page_size
+        swa_tokens = int(full_token * self.swa_ratio) // page_size * page_size
+        return _DSv4PoolSizes(
             full_max_total_num_tokens=full_token,
             swa_max_total_num_tokens=swa_tokens,
             c4_max_total_num_tokens=full_token // (4 * self.c4_shrink_factor),
@@ -130,58 +403,34 @@ class DSv4PoolConfigurator:
             c4_state_pool_size=swa_tokens // self.swa_page_size * self.c4_ring_size,
             c128_state_pool_size=swa_tokens // self.swa_page_size * self.c128_ring_size,
         )
+
+    def _to_config(self, sizes: _DSv4PoolSizes) -> MemoryPoolConfig:
+        full = sizes.full_max_total_num_tokens
+        swa = sizes.swa_max_total_num_tokens
         logger.info(
-            f"DSv4 memory calculation: "
-            f"bytes_per_full_token={self.bytes_per_full_token:.2f}, "
-            f"available_bytes={available_bytes / (1 << 30):.2f} GB, "
-            f"full_token={full_token}"
+            f"DSv4 pool sizes: full={full}, swa={swa}, "
+            f"c4={sizes.c4_max_total_num_tokens}, "
+            f"c128={sizes.c128_max_total_num_tokens}, "
+            f"c4_state={sizes.c4_state_pool_size}, "
+            f"c128_state={sizes.c128_state_pool_size}"
         )
-        return pool_sizes
-
-    def _profile_available_bytes(self, pre_model_load_memory: int) -> int:
-        post_model_load_memory = get_available_gpu_memory(
-            self._mr.device,
-            self._mr.gpu_id,
-            distributed=get_world_group().world_size > 1,
-            cpu_group=get_world_group().cpu_group,
-        )
-        rest_memory = post_model_load_memory - pre_model_load_memory * (
-            1 - self._mr.mem_fraction_static
-        )
-        available_bytes = int(rest_memory * (1 << 30))
-        logger.info(
-            f"DSv4 memory profiling: post_model_load_memory={post_model_load_memory:.2f} GB, "
-            f"pre_model_load_memory={pre_model_load_memory:.2f} GB, "
-            f"mem_fraction_static={self._mr.mem_fraction_static:.2f}, "
-            f"rest_memory={rest_memory:.2f} GB"
-        )
-        return available_bytes
-
-    def resolve(self, pre_model_load_memory: int) -> MemoryPoolConfig:
-        """Profile + size + apply user cap, returning a complete MemoryPoolConfig."""
-        from sglang.srt.model_executor.model_runner_kv_cache_mixin import (
-            MemoryPoolConfig,
+        return MemoryPoolConfig(
+            max_total_num_tokens=full,
+            full_max_total_num_tokens=full,
+            swa_max_total_num_tokens=swa,
+            c4_max_total_num_tokens=sizes.c4_max_total_num_tokens,
+            c128_max_total_num_tokens=sizes.c128_max_total_num_tokens,
+            c4_state_pool_size=sizes.c4_state_pool_size,
+            c128_state_pool_size=sizes.c128_state_pool_size,
         )
 
-        # Compressed attention always stores c4/c128 states in fp32. _init_pools
-        # reads self.state_dtype when constructing DeepSeekV4TokenToKVPool.
-        self._mr.state_dtype = torch.float32
-        logger.info(
-            f"DSv4 compressed attention: kv_cache_dtype={self._mr.kv_cache_dtype}"
-        )
-        logger.info(f"DSv4 compressed attention: state_dtype={self._mr.state_dtype}")
+    def calculate_pool_sizes(
+        self, available_bytes: int, page_size: int
+    ) -> MemoryPoolConfig:
+        assert (
+            page_size % 128 == 0
+        ), "page_size must be multiple of 128 for compressed attention"
 
-        # Online c128 keeps a single in-progress (max, sum, kv) state per index
-        # and assumes a strict forward-only schedule. Speculative decode (MTP)
-        # would need rollback / replay across draft and verify, which the
-        # online path doesn't support yet.
-        if envs.SGLANG_OPT_USE_ONLINE_COMPRESS.get():
-            assert (
-                self._mr.spec_algorithm.is_none()
-            ), "SGLANG_OPT_USE_ONLINE_COMPRESS does not support speculative decode (MTP) yet"
-            logger.info("DSv4 compressed attention: online c128 enabled (ring_size=1)")
-
-        available_bytes = self._profile_available_bytes(pre_model_load_memory)
         if self.is_speculative:
             # Reserve memory for the speculative draft worker's layers.
             draft_layers = 1
@@ -190,33 +439,33 @@ class DSv4PoolConfigurator:
                 available_bytes * target_layers / (target_layers + draft_layers)
             )
 
-        pool_sizes = self._calculate_pool_sizes(available_bytes)
-
-        # Apply user max_total_tokens cap by recomputing from cap.
-        user_cap = self._mr.server_args.max_total_tokens
-        if user_cap is not None and pool_sizes.full_max_total_num_tokens > user_cap:
-            pool_sizes = self._calculate_pool_sizes(
-                int(user_cap * self.bytes_per_full_token)
-            )
-
-        full = pool_sizes.full_max_total_num_tokens
-        swa = pool_sizes.swa_max_total_num_tokens
+        full_token = int(available_bytes / self.bytes_per_full_token)
+        sizes = self._solve_pool_sizes(full_token, page_size)
         logger.info(
-            f"DSv4 pool sizes: full={full}, swa={swa}, "
-            f"c4={pool_sizes.c4_max_total_num_tokens}, "
-            f"c128={pool_sizes.c128_max_total_num_tokens}, "
-            f"c4_state={pool_sizes.c4_state_pool_size}, "
-            f"c128_state={pool_sizes.c128_state_pool_size}"
+            f"DSv4 memory calculation: "
+            f"bytes_per_full_token={self.bytes_per_full_token:.2f}, "
+            f"available_bytes={available_bytes / (1 << 30):.2f} GB, "
+            f"full_token={sizes.full_max_total_num_tokens}"
         )
+        return self._to_config(sizes)
 
-        return MemoryPoolConfig(
-            max_total_num_tokens=full,
-            max_running_requests=self._mr._resolve_max_num_reqs(full),
-            full_max_total_num_tokens=full,
-            swa_max_total_num_tokens=swa,
-            c4_max_total_num_tokens=pool_sizes.c4_max_total_num_tokens,
-            c128_max_total_num_tokens=pool_sizes.c128_max_total_num_tokens,
-            c4_state_pool_size=pool_sizes.c4_state_pool_size,
-            c128_state_pool_size=pool_sizes.c128_state_pool_size,
-            mem_fraction_static=self._mr.server_args.mem_fraction_static,
-        )
+    def calculate_pool_sizes_from_max_tokens(
+        self, max_total_num_tokens: int, page_size: int
+    ) -> MemoryPoolConfig:
+        assert (
+            page_size % 128 == 0
+        ), "page_size must be multiple of 128 for compressed attention"
+        sizes = self._solve_pool_sizes(max_total_num_tokens, page_size)
+        return self._to_config(sizes)
+
+
+def create_memory_pool_configurator(
+    mr: ModelRunner,
+) -> MemoryPoolConfigurator:
+    """Factory: select the right configurator for the model architecture."""
+    if is_deepseek_compressed(mr.model_config.hf_config) and mr.is_hybrid_swa:
+        return DSv4PoolConfigurator(mr)
+    if mr.is_hybrid_swa:
+        return HybridSWAPoolConfigurator(mr)
+    # Future: MambaPoolConfigurator
+    return DefaultPoolConfigurator(mr)
