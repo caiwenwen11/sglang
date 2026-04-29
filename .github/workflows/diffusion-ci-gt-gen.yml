@@ -23,6 +23,26 @@ on:
         required: false
         default: ''
         type: string
+      ci_data_source_repo:
+        description: 'Optional source repo for syncing non-generated ci-data files, e.g. mickqian/sglang-ci-data-upstream-pr.'
+        required: false
+        default: ''
+        type: string
+      ci_data_source_ref:
+        description: 'Optional source ref for syncing non-generated ci-data files.'
+        required: false
+        default: ''
+        type: string
+      ci_data_sync_preset:
+        description: 'Optional ci-data file sync preset.'
+        required: false
+        default: ''
+        type: string
+      ci_data_sync_only:
+        description: 'Skip GT generation and only sync ci-data files from ci_data_source_repo/ref.'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: diffusion-ci-gt-gen-${{ github.ref }}
@@ -39,7 +59,7 @@ env:
 
 jobs:
   compute-diffusion-partitions:
-    if: github.repository == 'sgl-project/sglang'
+    if: github.repository == 'sgl-project/sglang' && !inputs.ci_data_sync_only
     runs-on: ubuntu-latest
     outputs:
       matrix-1gpu: ${{ steps.compute.outputs.matrix-1gpu }}
@@ -269,3 +289,64 @@ jobs:
           python scripts/ci/utils/diffusion/publish_diffusion_gt.py \
             --source-dir python/${{ env.OUTPUT_NAME }} \
             ${{ inputs.output_name != '' && format('--target-dir diffusion-ci/{0}', inputs.output_name) || '' }}
+
+  sync-ci-data-files:
+    if: |
+      always() &&
+      github.repository == 'sgl-project/sglang' &&
+      inputs.ci_data_source_repo != '' &&
+      inputs.ci_data_source_ref != '' &&
+      inputs.ci_data_sync_preset == 'ltx23-one-stage-ti2v'
+    needs:
+      - compute-diffusion-partitions
+      - multimodal-diffusion-gen-1gpu
+      - multimodal-diffusion-gen-2gpu
+      - multimodal-diffusion-gen-b200
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Checkout ci-data source files
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.ci_data_source_repo }}
+          ref: ${{ inputs.ci_data_source_ref }}
+          path: ci-data-source
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            diffusion-ci/consistency_gt/ltx_2.3_one_stage_ti2v_2gpu_frame_0.png
+            diffusion-ci/consistency_gt/ltx_2.3_one_stage_ti2v_2gpu_frame_mid.png
+            diffusion-ci/consistency_gt/ltx_2.3_one_stage_ti2v_2gpu_frame_last.png
+            diffusion-ci/consistency_gt/official_generated/ltx_2.3_one_stage_ti2v_2gpu_frame_0.png
+            diffusion-ci/consistency_gt/official_generated/ltx_2.3_one_stage_ti2v_2gpu_frame_mid.png
+            diffusion-ci/consistency_gt/official_generated/ltx_2.3_one_stage_ti2v_2gpu_frame_last.png
+            diffusion-ci/repro_scripts/gen_official_ltx23.py
+            diffusion-ci/repro_scripts/run_official_ltx23.sh
+            diffusion-ci/repro_scripts/official_repro_case_map.json
+
+      - name: Build ci-data path list
+        run: |
+          cat > /tmp/ci-data-paths.txt <<'EOF'
+          diffusion-ci/consistency_gt/ltx_2.3_one_stage_ti2v_2gpu_frame_0.png
+          diffusion-ci/consistency_gt/ltx_2.3_one_stage_ti2v_2gpu_frame_mid.png
+          diffusion-ci/consistency_gt/ltx_2.3_one_stage_ti2v_2gpu_frame_last.png
+          diffusion-ci/consistency_gt/official_generated/ltx_2.3_one_stage_ti2v_2gpu_frame_0.png
+          diffusion-ci/consistency_gt/official_generated/ltx_2.3_one_stage_ti2v_2gpu_frame_mid.png
+          diffusion-ci/consistency_gt/official_generated/ltx_2.3_one_stage_ti2v_2gpu_frame_last.png
+          diffusion-ci/repro_scripts/gen_official_ltx23.py
+          diffusion-ci/repro_scripts/run_official_ltx23.sh
+          diffusion-ci/repro_scripts/official_repro_case_map.json
+          EOF
+
+      - name: Publish ci-data files to sglang-bot/sglang-ci-data
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT_FOR_NIGHTLY_CI_DATA }}
+          COMMIT_MESSAGE: 'diffusion-ci: refresh LTX2.3 one-stage TI2V GT and repro scripts [automated]'
+        run: |
+          python scripts/ci/utils/diffusion/publish_ci_data_files.py \
+            --source-root ci-data-source \
+            --paths-file /tmp/ci-data-paths.txt \
+            --commit-message "$COMMIT_MESSAGE"
